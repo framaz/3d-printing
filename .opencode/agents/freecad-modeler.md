@@ -89,6 +89,81 @@ Before declaring the model done:
 - Answer in the user's language.
 - Do not save files, readmes, or exports unless the user asks.
 
+## Engineering notes (FreeCAD Part API, learned the hard way)
+
+### Verify geometry, not impressions
+- After each boolean, list `shape.Faces` with surface class, area and per-face `BoundBox`.
+  Differences between plane coordinates give wall thickness directly (top z=7.6 vs cavity
+  ceiling z=6.4 → 1.2). Twenty printed faces catch more errors than any screenshot.
+- `Shape.BoundBox` right after booleans can be stale or tessellation-inflated (a Ø59.5
+  rim reporting 29.65). Re-fetch the object after `doc.recompute()`, or use
+  `optimalBoundingBox()`.
+- `shape.isInside(App.Vector(x, y, z), 1e-6, True)` is the cheapest proof that a cavity
+  is open or a wall exists. Probe 4–6 strategic points and print them.
+- `face.distToShape(Part.Vertex(p))` measures the real wall between two faces.
+- Check `isValid()` **and** `check(True)` (`None` means no errors).
+
+### Boolean traps
+- A cutting solid must extend **past** the open face by about one wall thickness, and
+  past the bottom face as well. A cutter that stops exactly on a face leaves a
+  zero-thickness face or fails to open the cavity at all.
+- Tangent contacts (a wall tangent to a plane) are fragile: they merge faces, break
+  fillets, and can produce knife edges. Let a profile meet a plane at a real angle, or
+  bake the blend into the 2D profile instead of calling a fillet.
+- Finish with `removeSplitter()`, then `obj.Shape = solid.Solids[0]` so the document
+  holds a `Solid`, not a `Compound`.
+
+### Fillets
+- Select edges by testing **all** their vertices — never by midpoint/radius heuristics.
+  A midpoint test silently grabs interior edges of an already-rounded rim.
+- `makeFillet` propagates along tangent-continuous chains: it may fail with
+  `BRep_API: command not done`, or succeed while eating material.
+- Always compare the volume before/after. A concave (inside-corner) fillet must
+  **increase** the volume; a decrease means the wrong edges were selected.
+- If the fillet cannot be trusted, build the blend into the profile — deterministic.
+
+### Building profiles
+- `Part.Ellipse(center, a, b)` takes no normal argument. Draw the profile in XY and rotate:
+  - `Rotation(Vector(1,1,1), 120)` maps X→Y→Z→X (draw (u,v), extrude +Z, get a YZ profile
+    extruded along X);
+  - `Rotation(Vector(1,0,0), 90)` maps y→z and turns extrusion +Z into −Y.
+- Constant-thickness shell around an elliptical arch: concentric ellipse `(a − t, b − t)` —
+  exact on the axes, ≈0.1 mm drift elsewhere; use `makeOffset2D(-t)` when exactness matters.
+- When a shape is a "dome with two different wall angles", build it as the **intersection
+  of two extrusions** (each carrying one profile) rather than trying to loft one profile
+  that satisfies both readings.
+
+### Spreadsheet driving
+- `sh.set("B2", "59.5 mm")` then `sh.setAlias("B2", "name")`; `sh.get("name")` returns
+  `"59.5 mm"` — parse with `App.Units.Quantity(...).Value`.
+- Reading a cell past the used range raises `Invalid cell address or property`; wrap row
+  scans in `try/except`.
+- Derived cells hold formulas (`=boss_length - plate_thickness`) and must be re-derived
+  whenever the topology concept changes — the same cavity needed three different lengths
+  across three interpretations.
+- Make the build script idempotent: delete every non-`Spreadsheet` object, recompute,
+  rebuild. Safe to re-run, never duplicates.
+
+### Reverse-engineering from photos
+- Crop and upscale with .NET `System.Drawing` via PowerShell on Windows; read the crops.
+- The photo→solid step is where errors live: a profile rotated 90° still "looks right" in
+  a thumbnail. State the cross-section in words ("arch across the edge" vs "arch along the
+  edge", "width at the top vs at the bottom") and get it confirmed before building.
+  Budget 2–3 iterations when the source is only photographs, and keep every rejected
+  interpretation in the notes so it is not retried.
+- Cyrillic paths: `Get-ChildItem -LiteralPath`, with `[Console]::OutputEncoding =
+  [Text.Encoding]::UTF8` set first, or names print as `?????`.
+- Do not run extra code in the same `execute_code` call that rebuilds the document — the
+  stale-object references abort the call and FreeCAD can roll the rebuild back. Rebuild in
+  one call, inspect in the next.
+
+### Leave notes next to the part
+When a model is finished, write two files in the part folder: `Модель.md` (parameter table
+with current values, construction order, verification baseline including volume/face
+count/`isInside` probes, open questions, rejected interpretations) and `build.py` (the
+idempotent rebuild script). The next iteration then costs minutes, and the numbers used
+stay traceable to the user's answers.
+
 <!--
 Base prompt: ASSET_CREATION_STRATEGY from neka-nat/freecad-mcp
 (src/freecad_mcp/prompt_text.py, exposed as the MCP prompt `asset_creation_strategy`).
